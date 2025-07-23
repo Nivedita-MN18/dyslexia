@@ -23,12 +23,14 @@ if (typeof global.Buffer === 'undefined') {
 }
 
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker'; // NEW: For camera and library
+import * as Print from 'expo-print'; // NEW: For printing to PDF
+import * as Sharing from 'expo-sharing'; // NEW: For sharing the PDF
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Audio } from 'expo-av'; // For playing audio
-import * as Font from 'expo-font'; // For custom fonts
-import Slider from '@react-native-community/slider'; // For sliders
-
+import { Audio } from 'expo-av';
+import * as Font from 'expo-font';
+import Slider from '@react-native-community/slider';
 // Define your backend URL
 const BACKEND_URL = 'http://192.168.147.171:8000'; // Example for Android emulator, adjust as needed
 
@@ -59,7 +61,17 @@ export default function App(): JSX.Element {
   const [backgroundColor, setBackgroundColor] = useState<string>('#F0F2F6');
   const [isSettingsModalVisible, setIsSettingsModalVisible] = useState<boolean>(false);
   const [isQuizModalVisible, setIsQuizModalVisible] = useState<boolean>(false);
-
+// Helper to reset state before new content upload
+  const resetState = () => {
+    setFilePath(null);
+    setExtractedText('');
+    setProcessedText('');
+    setImageUrls([]);
+    setQuizData([]);
+    setSelectedAnswers([]);
+    setCurrentView('actual');
+    setIsLoading(true);
+  };
   // Create dynamic text style based on customization settings
   const dynamicTextStyle = useMemo(() => ({
     fontSize: fontSize,
@@ -91,7 +103,30 @@ export default function App(): JSX.Element {
     }
     loadResourcesAndDataAsync();
   }, []);
+  const pickImageFromCamera = async () => {
+    const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permissionResult.granted) {
+      Alert.alert("Permission Denied", "You need to grant camera permissions to use this feature.");
+      return;
+    }
 
+    try {
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 1,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        resetState();
+        setFilePath(result.assets[0].uri);
+        uploadAndProcessImage(result.assets[0].uri);
+      }
+    } catch (err: any) {
+      Alert.alert('Error', 'Failed to capture image: ' + err.message);
+      setIsLoading(false);
+    }
+  };
   // Determine which text to display based on current view mode
   const textToDisplay = useMemo(() => {
     switch (currentView) {
@@ -191,7 +226,30 @@ export default function App(): JSX.Element {
       Alert.alert('Error', `Failed to upload/process PDF: ${error.response?.data?.detail || error.message}`);
     }
   };
+  // NEW: uploadAndProcessImage function
+  const uploadAndProcessImage = async (uri: string) => {
+    const formData = new FormData();
+    const fileType = uri.endsWith('.png') ? 'image/png' : 'image/jpeg';
+    formData.append('image_file', {
+      uri: Platform.OS === 'ios' ? uri.replace('file://', '') : uri,
+      name: uri.split('/').pop() || 'photo.jpg',
+      type: fileType,
+    } as any);
 
+    try {
+      const response = await axios.post(`${BACKEND_URL}/upload_image`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 300000,
+      });
+      setExtractedText(response.data.text || 'No text extracted from image.');
+      setImageUrls(response.data.image_urls || []);
+    } catch (error: any) {
+      Alert.alert('Error', `Failed to process image: ${error.response?.data?.detail || error.message}`);
+      setExtractedText(`Error: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
   // --- Text Processing (Backend Calls for Simplify/Summarize) ---
   const processText = async (mode: string) => {
     if (!extractedText || extractedText.trim().length === 0) {
@@ -277,10 +335,10 @@ export default function App(): JSX.Element {
   // --- TTS Playback (Backend Call for Audio) ---
   const speakText = async (text: string) => {
     if (!text || text.trim().length === 0) return;
-    // FIX: Removed API key check here, as backend uses its own hardcoded key.
-    // const apiKey = userGeminiApiKey;
+    // FIX: Removed API key check here, as backendy = userGeminiApiKey;
     // if (!apiKey || apiKey.trim().length === 0) {
-    //   setIsApiKeyModalVisible(true);
+    //   setIsApiKeyModalVisi uses its own hardcoded key.
+    //     // const apiKeble(true);
     //   return;
     // }
 
@@ -345,6 +403,57 @@ export default function App(): JSX.Element {
     setSelectedAnswers(Array(quizData.length).fill(null)); 
     setIsQuizModalVisible(true);
   };
+  // NEW: printToPdf function
+  const printToPdf = async () => {
+    if (!textToDisplay.trim()) {
+      Alert.alert("No Content", "There is no text to print.");
+      return;
+    }
+
+    const htmlContent = `
+      <html>
+        <head>
+          <style>
+            body {
+              font-family: 'OpenDyslexic', sans-serif;
+              font-size: ${fontSize}px;
+              line-height: ${lineHeight};
+              letter-spacing: ${letterSpacing}em;
+              color: ${textColor};
+              margin: 40px;
+              text-align: justify;
+              word-wrap: break-word;
+            }
+            h1 {
+              font-size: ${fontSize * 1.5}px;
+              color: #000;
+              border-bottom: 2px solid #ccc;
+              padding-bottom: 10px;
+            }
+            p {
+              white-space: pre-wrap; /* Preserves line breaks from original text */
+            }
+          </style>
+        </head>
+        <body>
+          <h1>${currentView.charAt(0).toUpperCase() + currentView.slice(1)} View</h1>
+          <p>${textToDisplay}</p>
+        </body>
+      </html>
+    `;
+
+    try {
+      const { uri } = await Print.printToFileAsync({ html: htmlContent });
+      console.log('PDF generated at:', uri);
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert("Sharing not available", "Sharing is not available on your platform.");
+        return;
+      }
+      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Share or Save PDF' });
+    } catch (error: any) {
+      Alert.alert("PDF Error", "Failed to create or share the PDF file: " + error.message);
+    }
+  };
 
   const submitQuiz = () => {
     let score = 0;
@@ -384,6 +493,7 @@ export default function App(): JSX.Element {
               This key is used for local app functionality. The backend uses its own key.
               You can get one for free from Google AI Studio (aistudio.google.com).
             </Text>
+
             <TextInput
               style={styles.input}
               placeholder="YOUR_GEMINI_API_KEY"
@@ -510,72 +620,106 @@ export default function App(): JSX.Element {
         </View>
       </Modal>
 
-      <View style={styles.header}>
-        <Text style={styles.appTitle}>Dyslexia Reader</Text>
-        <TouchableOpacity onPress={() => setIsSettingsModalVisible(true)}>
-          <Text style={styles.settingsButton}>Settings</Text>
-        </TouchableOpacity>
+      return (
+      <View style={[styles.container, { backgroundColor: backgroundColor }]}>
+        {/* Modals for API Key, Settings, and Quiz remain unchanged... */}
+
+        {/* --- HEADER --- */}
+        <View style={styles.header}>
+          <Text style={styles.appTitle}>Dyslexia Reader</Text>
+          <TouchableOpacity onPress={() => setIsSettingsModalVisible(true)}>
+            <Text style={styles.settingsButton}>Settings</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* --- UPLOAD BUTTONS (CORRECTED LAYOUT) --- */}
+        <View style={styles.uploadContainer}>
+          <TouchableOpacity style={styles.uploadButton} onPress={pickDocument} disabled={isLoading}>
+            <Text style={styles.uploadButtonText}>Upload PDF</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.uploadButton} onPress={pickImageFromCamera} disabled={isLoading}>
+            <Text style={styles.uploadButtonText}>Take Photo</Text>
+          </TouchableOpacity>
+        </View>
+
+        {filePath && (
+            <Text style={styles.fileName}>Source: {filePath.split('/').pop()}</Text>
+        )}
+
+        {/* --- VIEW MODE TOGGLES (CORRECTED) --- */}
+        <View style={styles.viewModeButtons}>
+          <TouchableOpacity
+              style={[styles.viewModeButton, currentView === 'actual' && styles.viewModeButtonActive]}
+              onPress={() => setCurrentView('actual')}
+              disabled={isLoading || !extractedText}
+          >
+            <Text style={[styles.viewModeButtonText, currentView === 'actual' && styles.viewModeButtonTextActive]}>Original</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+              style={[styles.viewModeButton, currentView === 'simplified' && styles.viewModeButtonActive]}
+              onPress={() => processText('simplified')}
+              disabled={isLoading || !extractedText}
+          >
+            <Text style={[styles.viewModeButtonText, currentView === 'simplified' && styles.viewModeButtonTextActive]}>Simplified</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+              style={[styles.viewModeButton, currentView === 'summary' && styles.viewModeButtonActive]}
+              onPress={() => processText('summary')}
+              disabled={isLoading || !extractedText}
+          >
+            <Text style={[styles.viewModeButtonText, currentView === 'summary' && styles.viewModeButtonTextActive]}>Summary</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* --- LOADING INDICATOR --- */}
+        {isLoading ? (
+            <ActivityIndicator size="large" color="#007bff" style={styles.spinner} />
+        ) : (
+            // --- CONTENT AND ACTION BUTTONS ---
+            <ScrollView style={styles.contentScrollView}
+                        contentContainerStyle={{ paddingBottom: 60 }}
+            >
+              {imageUrls.map((url, index) => (
+                  <Image
+                      key={index}
+                      source={{ uri: url }}
+                      style={styles.contentImage}
+                      resizeMode="contain"
+                  />
+              ))}
+              <Text style={dynamicTextStyle}>
+                {textToDisplay}
+              </Text>
+
+              {/* --- ACTION BUTTONS CONTAINER (CORRECTED) --- */}
+              {textToDisplay.trim().length > 0 && (
+                  <View style={styles.bottomActionsContainer}>
+                    <TouchableOpacity style={styles.bottomActionButton} onPress={() => speakText(textToDisplay)}>
+                      <Text style={styles.bottomActionButtonText}>Listen</Text>
+                    </TouchableOpacity>
+
+                    {currentView !== 'summary' && (
+                        <TouchableOpacity style={styles.bottomActionButton} onPress={generateQuiz}>
+                          <Text style={styles.bottomActionButtonText}>Quiz</Text>
+                        </TouchableOpacity>
+                    )}
+
+                    <TouchableOpacity style={styles.bottomActionButton} onPress={printToPdf}>
+                      <Text style={styles.bottomActionButtonText}>Print to PDF</Text>
+                    </TouchableOpacity>
+                  </View>
+              )}
+            </ScrollView>
+        )}
       </View>
+      );
 
-      <TouchableOpacity style={styles.uploadButton} onPress={pickDocument} disabled={isLoading}>
-        <Text style={styles.uploadButtonText}>Upload PDF</Text>
-      </TouchableOpacity>
 
-      {filePath && (
-        <Text style={styles.fileName}>Selected: {filePath.split('/').pop()}</Text>
-      )}
 
-      <View style={styles.viewModeButtons}>
-        <TouchableOpacity
-          style={[styles.viewModeButton, currentView === 'actual' && styles.viewModeButtonActive]}
-          onPress={() => displayContent(extractedText, 'actual')}
-          disabled={isLoading || !extractedText || extractedText.trim().length === 0}
-        >
-          <Text style={[styles.viewModeButtonText, currentView === 'actual' && styles.viewModeButtonTextActive]}>Actual</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.viewModeButton, currentView === 'simplified' && styles.viewModeButtonActive]}
-          onPress={() => processText('simplified')}
-          disabled={isLoading || !extractedText || extractedText.trim().length === 0}
-        >
-          <Text style={[styles.viewModeButtonText, currentView === 'simplified' && styles.viewModeButtonTextActive]}>Simplified</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.viewModeButton, currentView === 'summary' && styles.viewModeButtonActive]}
-          onPress={() => processText('summary')}
-          disabled={isLoading || !extractedText || extractedText.trim().length === 0}
-        >
-          <Text style={[styles.viewModeButtonText, currentView === 'summary' && styles.viewModeButtonTextActive]}>Summary</Text>
-        </TouchableOpacity>
-      </View>
 
-      {isLoading ? (
-        <ActivityIndicator size="large" color="#0000ff" style={styles.spinner} />
-      ) : (
-        <ScrollView style={styles.contentScrollView}>
-          {imageUrls.map((url, index) => (
-            <Image
-              key={index}
-              source={{ uri: url }}
-              style={styles.contentImage}
-              resizeMode="contain"
-            />
-          ))}
-          <Text style={dynamicTextStyle}>
-            {textToDisplay}
-          </Text>
-          {currentView !== 'summary' && textToDisplay.trim().length > 0 && (
-            <TouchableOpacity style={styles.quizButton} onPress={generateQuiz}>
-              <Text style={styles.quizButtonText}>Generate Quiz</Text>
-            </TouchableOpacity>
-          )}
-          {textToDisplay.trim().length > 0 && (
-            <TouchableOpacity style={styles.listenButton} onPress={() => speakText(textToDisplay)}>
-              <Text style={styles.listenButtonText}>Listen to Text</Text>
-            </TouchableOpacity>
-          )}
-        </ScrollView>
-      )}
+
+          )
+      )
     </View>
   );
 }
@@ -791,9 +935,77 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     backgroundColor: '#007bff',
   },
+  // Add these inside your StyleSheet.create({ ... }) block
+
+  uploadContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    width: '90%',
+    marginBottom: 15,
+  },
+  actionButton: {
+    backgroundColor: '#007bff',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    flex: 1, // Allows buttons to share space equally
+    marginHorizontal: 5,
+    alignItems: 'center',
+    elevation: 3, // Adds a subtle shadow on Android
+  },
+  actionButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+    fontFamily: 'OpenDyslexic',
+  },
   quizOptionText: {
     fontSize: 15,
     fontFamily: 'OpenDyslexic',
+  },
+  // Remove old button styles and use these instead
+  uploadContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    width: '90%',
+    marginBottom: 15,
+  },
+  uploadButton: {
+    backgroundColor: '#007bff',
+    paddingVertical: 12,
+    borderRadius: 8,
+    flex: 1,
+    marginHorizontal: 5,
+    alignItems: 'center',
+    elevation: 3,
+  },
+  uploadButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+    fontFamily: 'OpenDyslexic',
+  },
+  bottomActionsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+    paddingTop: 15,
+    marginBottom: 20,
+  },
+  bottomActionButton: {
+    backgroundColor: '#1A237E', // A deep purple for contrast
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 20,
+    alignItems: 'center',
+  },
+  bottomActionButtonText: {
+    color: 'white',
+    fontSize: 15,
+    fontFamily: 'OpenDyslexic',
+    fontWeight: 'bold',
   },
   quizActions: {
     flexDirection: 'row',
